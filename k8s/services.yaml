@@ -1,0 +1,54 @@
+# Headless service: gives the StatefulSet pod a stable DNS name
+# (ethereum-0.ethereum.ethereum.svc.cluster.local).
+apiVersion: v1
+kind: Service
+metadata:
+  name: ethereum
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: ethereum
+  ports:
+    - name: rpc
+      port: 8545
+    - name: beacon-api
+      port: 5052
+---
+# In-cluster JSON-RPC and beacon API. ClusterIP only: never expose RPC publicly,
+# and never expose the Engine API (8551) at all; it binds to localhost in the pod.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ethereum-rpc
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ethereum
+  ports:
+    - name: rpc
+      port: 8545
+      targetPort: rpc
+    - name: beacon-api
+      port: 5052
+      targetPort: beacon-api
+---
+# Metrics endpoints for the Prometheus ServiceMonitors.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ethereum-metrics
+  labels:
+    app.kubernetes.io/name: ethereum
+    metrics: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ethereum
+  ports:
+    - name: metrics-el
+      port: 6060
+      targetPort: metrics-el
+    - name: metrics-cl
+      port: 5054
+      targetPort: metrics-cl

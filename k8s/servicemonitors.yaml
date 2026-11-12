@@ -1,0 +1,17 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ethereum
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ethereum
+      metrics: "true"
+  endpoints:
+    # geth serves Prometheus format on a non-default path.
+    - port: metrics-el
+      path: /debug/metrics/prometheus
+      interval: 30s
+    - port: metrics-cl
+      path: /metrics
+      interval: 30s

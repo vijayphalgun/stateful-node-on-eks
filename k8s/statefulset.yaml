@@ -1,0 +1,201 @@
+# One Ethereum Sepolia node: geth (execution) and Lighthouse (consensus) in the same
+# pod, talking over the Engine API on localhost with a shared JWT secret.
+# Each client gets its own persistent volume from volumeClaimTemplates.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ethereum
+spec:
+  serviceName: ethereum
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ethereum
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ethereum
+    spec:
+      # Both clients flush in-memory state on SIGTERM. Killing them early can corrupt
+      # the database and force a resync measured in hours, so give them time.
+      terminationGracePeriodSeconds: 300
+      nodeSelector:
+        node-role: blockchain
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: blockchain
+          effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        # Only chown the volume when ownership is wrong. A recursive chown of a
+        # multi-hundred-GB chain on every restart can take many minutes.
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: geth
+          image: ethereum/client-go
+          args:
+            - --sepolia
+            - --datadir=/data
+            - --syncmode=snap
+            - --cache=4096
+            - --port=30303
+            - --http
+            - --http.addr=0.0.0.0
+            - --http.port=8545
+            - --http.api=eth,net,web3
+            - --http.vhosts=*
+            # Engine API stays on localhost: only Lighthouse in this pod can reach it.
+            - --authrpc.addr=127.0.0.1
+            - --authrpc.port=8551
+            - --authrpc.jwtsecret=/secrets/jwt.hex
+            - --metrics
+            - --metrics.addr=0.0.0.0
+            - --metrics.port=6060
+          env:
+            - name: HOME
+              value: /data
+            # Lets the Go runtime collect garbage before the container hits its limit.
+            - name: GOMEMLIMIT
+              value: 14GiB
+          ports:
+            - name: rpc
+              containerPort: 8545
+            - name: p2p-tcp
+              containerPort: 30303
+              protocol: TCP
+            - name: p2p-udp
+              containerPort: 30303
+              protocol: UDP
+            - name: metrics-el
+              containerPort: 6060
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              memory: 16Gi
+          # Initial sync takes hours; the startup probe stops liveness from
+          # killing a slow-but-healthy start.
+          startupProbe:
+            tcpSocket:
+              port: rpc
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            tcpSocket:
+              port: rpc
+            periodSeconds: 30
+            failureThreshold: 5
+          readinessProbe:
+            tcpSocket:
+              port: rpc
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: execution-data
+              mountPath: /data
+            - name: engine-jwt
+              mountPath: /secrets
+              readOnly: true
+
+        - name: lighthouse
+          image: sigp/lighthouse
+          command: ["lighthouse"]
+          args:
+            - bn
+            - --network=sepolia
+            - --datadir=/data
+            - --port=9000
+            - --http
+            - --http-address=0.0.0.0
+            - --http-port=5052
+            - --execution-endpoint=http://127.0.0.1:8551
+            - --execution-jwt=/secrets/jwt.hex
+            # Checkpoint sync: start from a recent finalized state instead of genesis.
+            - --checkpoint-sync-url=https://checkpoint-sync.sepolia.ethpandaops.io
+            - --metrics
+            - --metrics-address=0.0.0.0
+            - --metrics-port=5054
+          env:
+            - name: HOME
+              value: /data
+          ports:
+            - name: beacon-api
+              containerPort: 5052
+            - name: p2p-tcp-cl
+              containerPort: 9000
+              protocol: TCP
+            - name: p2p-udp-cl
+              containerPort: 9000
+              protocol: UDP
+            - name: metrics-cl
+              containerPort: 5054
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              memory: 8Gi
+          startupProbe:
+            tcpSocket:
+              port: beacon-api
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            tcpSocket:
+              port: beacon-api
+            periodSeconds: 30
+            failureThreshold: 5
+          # /eth/v1/node/health returns 200 when synced and 206 while syncing;
+          # both count as ready, a 503 does not.
+          readinessProbe:
+            httpGet:
+              path: /eth/v1/node/health
+              port: beacon-api
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: consensus-data
+              mountPath: /data
+            - name: engine-jwt
+              mountPath: /secrets
+              readOnly: true
+      volumes:
+        - name: engine-jwt
+          secret:
+            secretName: engine-jwt
+            defaultMode: 0440
+  # Sizes are starting points for Sepolia; check current client docs and
+  # expand the PVCs online as the chain grows.
+  volumeClaimTemplates:
+    - metadata:
+        name: execution-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3-chaindata
+        resources:
+          requests:
+            storage: 1000Gi
+    - metadata:
+        name: consensus-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: gp3-chaindata
+        resources:
+          requests:
+            storage: 200Gi

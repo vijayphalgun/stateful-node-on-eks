@@ -1,0 +1,63 @@
+# Alerts on symptoms an operator acts on: the node stopped following the chain,
+# lost its peers, or is about to run out of disk.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: ethereum-node
+spec:
+  groups:
+    - name: ethereum-node
+      rules:
+        - alert: ExecutionHeadStalled
+          expr: increase(chain_head_block{namespace="ethereum"}[15m]) == 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: geth head block has not advanced in 30 minutes
+            description: The execution client stopped importing blocks. Check consensus-client sync, peers, and disk.
+
+        - alert: ExecutionLowPeers
+          expr: p2p_peers{namespace="ethereum"} < 5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: geth has fewer than 5 peers
+            description: Low peer counts slow sync and block propagation. Check egress and NAT.
+
+        - alert: ConsensusHeadStalled
+          expr: increase(beacon_head_slot{namespace="ethereum"}[10m]) == 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: Lighthouse head slot has not advanced in 20 minutes
+
+        - alert: ConsensusLowPeers
+          expr: libp2p_peers{namespace="ethereum"} < 10
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: Lighthouse has fewer than 10 peers
+
+        - alert: ChainVolumeFillingUp
+          expr: |
+            kubelet_volume_stats_available_bytes{namespace="ethereum"}
+              / kubelet_volume_stats_capacity_bytes{namespace="ethereum"} < 0.15
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.persistentvolumeclaim }} has less than 15% free"
+            description: Expand the PVC (storage class allows online expansion) before the client halts.
+
+        - alert: ChainVolumeFullIn24h
+          expr: |
+            predict_linear(kubelet_volume_stats_available_bytes{namespace="ethereum"}[6h], 24 * 3600) < 0
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ $labels.persistentvolumeclaim }} is projected to fill within 24 hours"
